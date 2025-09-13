@@ -1,48 +1,35 @@
-import 'dart:io' show Platform;
-import 'package:camera/camera.dart';
+import 'dart:async';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoView, RTCVideoViewObjectFit;
+import 'package:permission_handler/permission_handler.dart' show Permission, PermissionActions, PermissionStatusGetters;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
-import 'camera_service.dart';
-import 'api_client.dart';
+import 'package:webrtc/api_client.dart' show ApiClient;
+import 'package:webrtc/camera_service.dart' show WebRTCService;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Check if platform is supported
-  if (Platform.isAndroid || Platform.isIOS) {
-    try {
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) {
-        runApp(PlatformErrorApp(error: 'No cameras found on this device'));
-      } else {
-        runApp(MyApp(cameras: cameras));
-      }
-    } catch (e) {
-      runApp(PlatformErrorApp(error: 'Camera initialization failed: $e'));
-    }
-  } else {
-    runApp(PlatformErrorApp(
-      error: 'Camera is only supported on Android and iOS devices',
-    ));
-  }
+  runApp(MyApp());
 }
 
 class MyApp extends StatefulWidget {
-  final List<CameraDescription> cameras;
-
-  const MyApp({Key? key, required this.cameras}) : super(key: key);
-
   @override
   _MyAppState createState() => _MyAppState();
 }
 
 class _MyAppState extends State<MyApp> {
-  final CameraService _cameraService = CameraService();
+  final WebRTCService _webRTCService = WebRTCService();
   final ApiClient _apiClient = ApiClient();
   bool _isSending = false;
   bool _isCameraInitialized = false;
   int _framesSent = 0;
+  int _successfulFrames = 0;
+  int _failedFrames = 0;
   String _errorMessage = '';
+  final List<String> _frameLogs = [];
+  Timer? _statsTimer;
 
   // Socket.IO and chat related variables
   late IO.Socket socket;
@@ -116,7 +103,13 @@ class _MyAppState extends State<MyApp> {
 
   Future<void> _initializeCamera() async {
     try {
-      await _cameraService.initializeCamera(widget.cameras);
+      // Request camera permission first
+      final status = await Permission.camera.request();
+      if (!status.isGranted) {
+        throw Exception('Camera permission denied');
+      }
+
+      await _webRTCService.initializeCamera();
       setState(() {
         _isCameraInitialized = true;
         _errorMessage = '';
@@ -131,18 +124,41 @@ class _MyAppState extends State<MyApp> {
 
   void _toggleSending() {
     if (_isSending) {
-      _cameraService.stopSendingFrames().then((framesSent) {
+      _webRTCService.stopSendingFrames().then((framesSent) {
         setState(() {
           _isSending = false;
           _framesSent = framesSent;
+          _successfulFrames = _webRTCService.successfulFrames;
+          _failedFrames = _webRTCService.failedFrames;
+          _frameLogs.addAll(_webRTCService.frameLogs);
         });
+        _statsTimer?.cancel();
       });
     } else {
       setState(() {
         _isSending = true;
         _framesSent = 0;
+        _successfulFrames = 0;
+        _failedFrames = 0;
+        _frameLogs.clear();
       });
-      _cameraService.startSendingFrames(_apiClient);
+      _webRTCService.startSendingFrames(_apiClient);
+
+      // Periodically update UI with frame stats
+      _statsTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+        if (!_isSending) {
+          timer.cancel();
+          return;
+        }
+        setState(() {
+          _successfulFrames = _webRTCService.successfulFrames;
+          _failedFrames = _webRTCService.failedFrames;
+          if (_webRTCService.frameLogs.isNotEmpty) {
+            _frameLogs.addAll(_webRTCService.frameLogs);
+            _webRTCService.clearFrameLogs();
+          }
+        });
+      });
     }
   }
 
@@ -185,16 +201,16 @@ class _MyAppState extends State<MyApp> {
         ),
       ),
     )
-        : _isCameraInitialized && _cameraService.controller.value.isInitialized
+        : _isCameraInitialized
         ? Column(
       children: [
         Expanded(
           child: Container(
             color: Colors.black,
             child: Center(
-              child: AspectRatio(
-                aspectRatio: _cameraService.controller.value.aspectRatio,
-                child: CameraPreview(_cameraService.controller),
+              child: RTCVideoView(
+                _webRTCService.localRenderer,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
               ),
             ),
           ),
@@ -202,17 +218,40 @@ class _MyAppState extends State<MyApp> {
         if (_isSending)
           Padding(
             padding: const EdgeInsets.all(8.0),
-            child: Text(
-              'Sending frames to backend...',
-              style: TextStyle(fontSize: 16, color: Colors.green),
+            child: Column(
+              children: [
+                Text(
+                  'Sending frames to backend...',
+                  style: TextStyle(fontSize: 16, color: Colors.green),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Successful: $_successfulFrames, Failed: $_failedFrames',
+                  style: TextStyle(fontSize: 14, color: Colors.blue),
+                ),
+                if (_frameLogs.isNotEmpty)
+                  Text(
+                    'Latest: ${_frameLogs.last}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+              ],
             ),
           ),
         if (_framesSent > 0 && !_isSending)
           Padding(
             padding: const EdgeInsets.all(8.0),
-            child: Text(
-              'Successfully sent $_framesSent frames!',
-              style: TextStyle(fontSize: 16, color: Colors.green),
+            child: Column(
+              children: [
+                Text(
+                  'Successfully sent $_framesSent frames!',
+                  style: TextStyle(fontSize: 16, color: Colors.green),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Successful: $_successfulFrames, Failed: $_failedFrames',
+                  style: TextStyle(fontSize: 14, color: Colors.blue),
+                ),
+              ],
             ),
           ),
         Padding(
@@ -284,7 +323,8 @@ class _MyAppState extends State<MyApp> {
 
   @override
   void dispose() {
-    _cameraService.dispose();
+    _statsTimer?.cancel();
+    _webRTCService.dispose();
     socket.disconnect();
     super.dispose();
   }
@@ -365,33 +405,5 @@ class ChatMessage extends StatelessWidget {
         child: SizedBox(),
       ),
     ];
-  }
-}
-
-class PlatformErrorApp extends StatelessWidget {
-  final String error;
-
-  const PlatformErrorApp({Key? key, required this.error}) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Error'),
-          backgroundColor: Colors.red,
-        ),
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: Text(
-              error,
-              style: TextStyle(fontSize: 18, color: Colors.red),
-              textAlign: TextAlign.center,
-            ),
-          ),
-        ),
-      ),
-    );
   }
 }

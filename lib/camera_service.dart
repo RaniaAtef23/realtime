@@ -1,59 +1,57 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'package:camera/camera.dart';
-import 'package:flutter/services.dart';
+
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'api_client.dart';
 
-class CameraService {
-  late CameraController controller;
+class WebRTCService {
+  late RTCVideoRenderer localRenderer;
+  MediaStream? _localStream;
   bool _isSendingFrames = false;
   int _frameCounter = 0;
   int _framesSent = 0;
+  int _successfulFrames = 0;
+  int _failedFrames = 0;
   int _frameSkip = 3; // Process every 3rd frame to reduce load
+  Timer? _frameTimer;
+  final List<String> _frameLogs = [];
 
-  Future<void> initializeCamera(List<CameraDescription> cameras) async {
+  WebRTCService() {
+    localRenderer = RTCVideoRenderer();
+  }
+
+  Future<void> initializeCamera() async {
     try {
-      // Try to find the front camera first (for self-view)
-      CameraDescription? selectedCamera;
+      await localRenderer.initialize();
 
-      for (var camera in cameras) {
-        if (camera.lensDirection == CameraLensDirection.front) {
-          selectedCamera = camera;
-          break;
+      // Get user media with video constraints
+      final Map<String, dynamic> constraints = {
+        "audio": false,
+        "video": {
+          "mandatory": {
+            "minWidth": '640',
+            "minHeight": '480',
+            "minFrameRate": '30',
+          },
+          "facingMode": "user",
+          "optional": []
         }
+      };
+
+      _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      if (_localStream!.getVideoTracks().isEmpty) {
+        throw Exception('No video tracks found in stream');
       }
 
-      // If no front camera found, try back camera
-      if (selectedCamera == null) {
-        for (var camera in cameras) {
-          if (camera.lensDirection == CameraLensDirection.back) {
-            selectedCamera = camera;
-            break;
-          }
-        }
-      }
+      localRenderer.srcObject = _localStream;
 
-      // If no camera found, use the first available
-      selectedCamera ??= cameras.first;
+      // Wait for the video to start
+      await Future.delayed(Duration(milliseconds: 500));
 
-      print("Selected camera: ${selectedCamera.name}, lens: ${selectedCamera.lensDirection}");
+      print("WebRTC camera initialized successfully");
 
-      controller = CameraController(
-        selectedCamera,
-        ResolutionPreset.medium,
-        enableAudio: false,
-      );
-
-      // Initialize the controller and wait for it to complete
-      await controller.initialize();
-
-      // Check if the controller is properly initialized
-      if (!controller.value.isInitialized) {
-        throw Exception('Camera controller failed to initialize');
-      }
-
-      print("Camera initialized successfully");
     } catch (e) {
       print('Error in initializeCamera: $e');
       rethrow;
@@ -61,21 +59,24 @@ class CameraService {
   }
 
   void startSendingFrames(ApiClient apiClient) {
-    if (!controller.value.isInitialized) {
-      print('Camera controller is not initialized');
+    if (_localStream == null) {
+      print('Local stream is not initialized');
       return;
     }
 
     _isSendingFrames = true;
     _framesSent = 0;
+    _successfulFrames = 0;
+    _failedFrames = 0;
     _frameCounter = 0;
+    _frameLogs.clear();
 
-    // Start listening to the image stream
-    controller.startImageStream((CameraImage image) {
+    // Capture frames at regular intervals
+    _frameTimer = Timer.periodic(Duration(milliseconds: 100), (timer) async {
       if (_isSendingFrames) {
         _frameCounter++;
         if (_frameCounter % _frameSkip == 0) {
-          _processFrame(image);
+          await _captureAndSendFrame(apiClient);
         }
       }
     });
@@ -83,66 +84,73 @@ class CameraService {
 
   Future<int> stopSendingFrames() async {
     _isSendingFrames = false;
-    await controller.stopImageStream();
+    _frameTimer?.cancel();
+    _frameTimer = null;
 
-    // Return the number of frames sent
     return _framesSent;
   }
 
-  Future<void> _processFrame(CameraImage image) async {
+  Future<void> _captureAndSendFrame(ApiClient apiClient) async {
     try {
-      // Convert CameraImage to PNG
-      final pngBytes = await convertCameraImageToPng(image);
+      final frame = await _captureFrame();
+      if (frame != null) {
+        final timestamp = DateTime.now();
+        final success = await apiClient.sendFrame(frame);
 
-      // Send to backend/AI service
-      final success = await ApiClient().sendFrame(pngBytes);
+        if (success) {
+          _framesSent++;
+          _successfulFrames++;
+          _frameLogs.add('✅ ${timestamp.hour}:${timestamp.minute}:${timestamp.second}: Frame $_framesSent sent successfully (${frame.length} bytes)');
+        } else {
+          _failedFrames++;
+          _frameLogs.add('❌ ${timestamp.hour}:${timestamp.minute}:${timestamp.second}: Frame failed to send');
+        }
 
-      if (success) {
-        // Increment the counter for successfully sent frames
-        _framesSent++;
+        // Keep log manageable
+        if (_frameLogs.length > 20) {
+          _frameLogs.removeAt(0);
+        }
+      } else {
+        _failedFrames++;
+        _frameLogs.add('❌ ${DateTime.now()}: Failed to capture frame');
       }
     } catch (e) {
       print('Error processing frame: $e');
+      _failedFrames++;
+      _frameLogs.add('❌ ${DateTime.now()}: Error: $e');
     }
   }
 
-  Future<Uint8List> convertCameraImageToPng(CameraImage image) async {
+  Future<Uint8List?> _captureFrame() async {
     try {
-      // For a simpler approach, let's use a different method
-      return await _simpleConvertCameraImageToPng(image);
+      // Simulate frame capture with a placeholder
+      await Future.delayed(Duration(milliseconds: 10));
+
+      // Create a simple placeholder frame data
+      final placeholder = Uint8List.fromList(List.generate(1000, (index) => index % 256));
+      return placeholder;
+
     } catch (e) {
-      print('Error in convertCameraImageToPng: $e');
-      rethrow;
+      print('Error capturing frame: $e');
+      return null;
     }
   }
 
-  Future<Uint8List> _simpleConvertCameraImageToPng(CameraImage image) async {
-    final int width = image.width;
-    final int height = image.height;
+  // Getters for monitoring
+  int get successfulFrames => _successfulFrames;
+  int get failedFrames => _failedFrames;
+  List<String> get frameLogs => List.from(_frameLogs);
 
-    // Create a simple placeholder image
-    final placeholder = await _createPlaceholderImage(width, height);
-    return placeholder;
-  }
-
-  Future<Uint8List> _createPlaceholderImage(int width, int height) async {
-    // Create a simple colored rectangle as a placeholder
-    final recorder = ui.PictureRecorder();
-    final canvas = ui.Canvas(recorder);
-    final paint = ui.Paint()
-      ..color = ui.Color(0xFF2196F3) // Blue color
-      ..style = ui.PaintingStyle.fill;
-
-    canvas.drawRect(ui.Rect.fromLTRB(0, 0, width.toDouble(), height.toDouble()), paint);
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(width, height);
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-
-    return byteData!.buffer.asUint8List();
+  void clearFrameLogs() {
+    _frameLogs.clear();
   }
 
   void dispose() {
-    controller.dispose();
+    _frameTimer?.cancel();
+    if (_localStream != null) {
+      _localStream!.getTracks().forEach((track) => track.stop());
+      localRenderer.srcObject = null;
+    }
+    localRenderer.dispose();
   }
 }
