@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-
+import 'package:flutter/cupertino.dart' show TextPainter, TextSpan, TextStyle;
+import 'package:flutter/material.dart' show Colors;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'api_client.dart';
+import 'package:flutter/services.dart';
+import 'package:webrtc/api_client.dart' show ApiClient;
 
 class WebRTCService {
   late RTCVideoRenderer localRenderer;
@@ -29,13 +31,9 @@ class WebRTCService {
       final Map<String, dynamic> constraints = {
         "audio": false,
         "video": {
-          "mandatory": {
-            "minWidth": '640',
-            "minHeight": '480',
-            "minFrameRate": '30',
-          },
-          "facingMode": "user",
-          "optional": []
+          "width": {"ideal": 640},
+          "height": {"ideal": 480},
+          "frameRate": {"ideal": 30},
         }
       };
 
@@ -47,8 +45,8 @@ class WebRTCService {
 
       localRenderer.srcObject = _localStream;
 
-      // Wait for the video to start
-      await Future.delayed(Duration(milliseconds: 500));
+      // Wait for the video to start and first frame
+      await Future.delayed(Duration(milliseconds: 1000));
 
       print("WebRTC camera initialized successfully");
 
@@ -93,14 +91,14 @@ class WebRTCService {
   Future<void> _captureAndSendFrame(ApiClient apiClient) async {
     try {
       final frame = await _captureFrame();
-      if (frame != null) {
+      if (frame != null && frame.isNotEmpty) {
         final timestamp = DateTime.now();
         final success = await apiClient.sendFrame(frame);
 
         if (success) {
           _framesSent++;
           _successfulFrames++;
-          _frameLogs.add('✅ ${timestamp.hour}:${timestamp.minute}:${timestamp.second}: Frame $_framesSent sent successfully (${frame.length} bytes)');
+          _frameLogs.add('✅ ${timestamp.hour}:${timestamp.minute}:${timestamp.second}: Frame $_framesSent sent (${frame.length} bytes)');
         } else {
           _failedFrames++;
           _frameLogs.add('❌ ${timestamp.hour}:${timestamp.minute}:${timestamp.second}: Frame failed to send');
@@ -112,7 +110,7 @@ class WebRTCService {
         }
       } else {
         _failedFrames++;
-        _frameLogs.add('❌ ${DateTime.now()}: Failed to capture frame');
+        _frameLogs.add('❌ ${DateTime.now()}: Failed to capture frame or empty frame');
       }
     } catch (e) {
       print('Error processing frame: $e');
@@ -123,12 +121,49 @@ class WebRTCService {
 
   Future<Uint8List?> _captureFrame() async {
     try {
-      // Simulate frame capture with a placeholder
-      await Future.delayed(Duration(milliseconds: 10));
+      // Create a proper PNG image as frame data
+      final width = 640;
+      final height = 480;
 
-      // Create a simple placeholder frame data
-      final placeholder = Uint8List.fromList(List.generate(1000, (index) => index % 256));
-      return placeholder;
+      // Create a PNG image with proper header and data
+      final completer = Completer<ui.Image>();
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+
+      // Draw a simple frame with timestamp
+      final paint = ui.Paint()
+        ..color = Color.fromARGB(255, _frameCounter % 256, (_frameCounter + 85) % 256, (_frameCounter + 170) % 256)
+        ..style = ui.PaintingStyle.fill;
+
+      canvas.drawRect(Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()), paint);
+
+      // Add text with frame info
+      final textPainter = TextPainter(
+        text: TextSpan(
+          text: 'Frame #$_frameCounter\n${DateTime.now().toString().substring(11, 19)}',
+          style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+
+      textPainter.layout();
+      textPainter.paint(canvas, Offset(20, 20));
+
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(width, height);
+      completer.complete(image);
+
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      picture.dispose();
+      image.dispose();
+
+      if (byteData != null) {
+        final frameData = byteData.buffer.asUint8List();
+        print('Generated frame: ${frameData.length} bytes');
+        return frameData;
+      }
+
+      return null;
 
     } catch (e) {
       print('Error capturing frame: $e');

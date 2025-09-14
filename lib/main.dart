@@ -1,13 +1,10 @@
 import 'dart:async';
-import 'dart:typed_data';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoView, RTCVideoViewObjectFit;
-import 'package:permission_handler/permission_handler.dart' show Permission, PermissionActions, PermissionStatusGetters;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
-import 'package:webrtc/api_client.dart' show ApiClient;
-import 'package:webrtc/camera_service.dart' show WebRTCService;
+import 'api_client.dart';
+import 'camera_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -65,7 +62,6 @@ class _MyAppState extends State<MyApp> {
     });
 
     socket.on('message', (data) {
-      // Handle incoming messages
       setState(() {
         _messages.add(ChatMessage(
           text: data['text'],
@@ -92,7 +88,6 @@ class _MyAppState extends State<MyApp> {
         _messageController.clear();
       });
 
-      // Send message via Socket.IO
       socket.emit('message', {
         'text': message,
         'sender': 'User',
@@ -103,7 +98,6 @@ class _MyAppState extends State<MyApp> {
 
   Future<void> _initializeCamera() async {
     try {
-      // Request camera permission first
       final status = await Permission.camera.request();
       if (!status.isGranted) {
         throw Exception('Camera permission denied');
@@ -144,7 +138,6 @@ class _MyAppState extends State<MyApp> {
       });
       _webRTCService.startSendingFrames(_apiClient);
 
-      // Periodically update UI with frame stats
       _statsTimer = Timer.periodic(Duration(seconds: 1), (timer) {
         if (!_isSending) {
           timer.cancel();
@@ -173,9 +166,7 @@ class _MyAppState extends State<MyApp> {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(
-          title: _showCamera
-              ? const Text('Camera View')
-              : const Text('Chat & Camera'),
+          title: _showCamera ? const Text('Camera View') : const Text('Chat & Camera'),
           backgroundColor: _showCamera ? Colors.blue : Colors.green,
           actions: [
             IconButton(
